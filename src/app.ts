@@ -1,100 +1,152 @@
 import express from 'express';
 import * as wppconnect from './index';
+import { Resolver } from 'dns';
+import fs from 'fs';
+import path from 'path';
 
 const app = express();
-const port = process.env.PORT || 7860;
+const port = process.env.NODE_PORT || 3000;
+
 let whatsappClient: wppconnect.Whatsapp | null = null;
+let lastQR: { ascii: string, base64: string } | null = null;
+let statusMsg: string = 'Disconnected';
+let appLogs: string[] = [];
+let isReady = false;
+let isInitializing = false;
+
+const log = (msg: string) => {
+  const entry = `${new Date().toISOString()} - ${msg}`;
+  console.log(entry);
+  appLogs.push(entry);
+  if (appLogs.length > 200) appLogs.shift();
+};
 
 app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
 
-// Mandatory Health Check
 app.get('/health', (req, res) => {
-  res.status(200).json({ status: 'UP', message: 'WPPConnect API is ready' });
-});
-
-// Mandatory API Docs
-app.get('/api-docs', (req, res) => {
-  res.status(200).json({
-    message: 'WPPConnect API Documentation',
-    endpoints: {
-      '/health': 'Health check endpoint',
-      '/api-docs': 'API documentation',
-      '/send-message': 'POST: Send a text message (telnumber, message)',
-      '/send-poll': 'POST: Send a poll message (telnumber, name, choices)',
-      '/get-connection-status': 'GET: Get the current WhatsApp connection status',
-    },
+  res.json({
+    status: 'UP',
+    connected: !!whatsappClient,
+    ready: isReady,
+    whatsappStatus: statusMsg,
+    hasQR: !!lastQR,
+    logs: appLogs
   });
 });
 
-app.get('/get-connection-status', async (req, res) => {
-  if (whatsappClient) {
+app.get('/qr-data', (req, res) => {
+  if (lastQR) res.json(lastQR);
+  else res.status(404).json({ error: 'No QR' });
+});
+
+app.get('/screenshot', async (req, res) => {
+  if (whatsappClient && whatsappClient.page) {
     try {
-      const state = await whatsappClient.getConnectionState();
-      res.json({ status: true, message: state });
-    } catch (error) {
-      res.status(500).json({ status: false, message: error.message });
+      const screenshot = await whatsappClient.page.screenshot({ encoding: 'base64' });
+      const img = Buffer.from(screenshot as string, 'base64');
+      res.writeHead(200, { 'Content-Type': 'image/png', 'Content-Length': img.length });
+      res.end(img);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
     }
   } else {
-    res.status(503).json({ status: false, message: 'WhatsApp instance not initialized' });
+    res.status(404).json({ error: 'Browser not active' });
   }
+});
+
+app.post('/init', (req, res) => {
+  if (isInitializing) return res.json({ success: false, message: 'Already initializing' });
+  startWPP();
+  res.json({ success: true });
 });
 
 app.post('/send-message', async (req, res) => {
   const { telnumber, message } = req.body;
-  if (!whatsappClient) {
-    return res.status(503).json({ status: false, message: 'WhatsApp instance not initialized' });
-  }
+  if (!whatsappClient || !isReady) return res.status(503).json({ error: 'WhatsApp not ready' });
   try {
     const result = await whatsappClient.sendText(`${telnumber}@c.us`, message);
-    res.json({ status: true, message: 'Message sent', result });
-  } catch (error) {
-    res.status(500).json({ status: false, message: error.message });
-  }
+    res.json({ success: true, result });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
 app.post('/send-poll', async (req, res) => {
   const { telnumber, name, choices } = req.body;
-  if (!whatsappClient) {
-    return res.status(503).json({ status: false, message: 'WhatsApp instance not initialized' });
-  }
+  if (!whatsappClient || !isReady) return res.status(503).json({ error: 'WhatsApp not ready' });
   try {
     const result = await whatsappClient.sendPollMessage(`${telnumber}@c.us`, name, choices);
-    res.json({ status: true, message: 'Poll sent', result });
-  } catch (error) {
-    res.status(500).json({ status: false, message: error.message });
-  }
+    res.json({ success: true, result });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-// Start WPPConnect
 async function startWPP() {
+  if (isInitializing) return;
+  isInitializing = true;
+  statusMsg = 'Initializing...';
+  log('Starting WPPConnect init...');
+
+  // Try to get IP for web.whatsapp.com manually
+  let waIP = '157.240.22.60';
+  try {
+    const resolver = new Resolver();
+    resolver.setServers(['8.8.8.8', '1.1.1.1']);
+    const addrs = await new Promise<string[]>((resolve, reject) => {
+      resolver.resolve4('web.whatsapp.com', (err, addresses) => err ? reject(err) : resolve(addresses));
+    });
+    if (addrs && addrs.length > 0) {
+        waIP = addrs[0];
+        log(`Resolved web.whatsapp.com to ${waIP}`);
+    }
+  } catch (e) {
+    log(`DNS failure, using fallback IP ${waIP}`);
+  }
+
+  // Cleanup tokens to avoid locks
+  try {
+    const tokensDir = path.join(process.cwd(), 'tokens');
+    if (fs.existsSync(tokensDir)) fs.rmSync(tokensDir, { recursive: true, force: true });
+    log('Cleaned tokens directory');
+  } catch (e) {}
+
   try {
     whatsappClient = await wppconnect.create({
-      session: 'hf-space-session',
-      catchQR: (base64Qr, asciiQR) => {
-        console.log('QR Code generated. Please scan to log in.');
-        console.log(asciiQR);
+      session: 'hf-session',
+      catchQR: (base64, ascii) => {
+        lastQR = { base64, ascii };
+        statusMsg = 'Waiting for scan';
+        log('QR generated');
       },
-      statusFind: (statusSession, session) => {
-        console.log('Status Session: ', statusSession, 'Session: ', session);
+      statusFind: (status) => {
+        statusMsg = status;
+        log('Status Change: ' + status);
+        if (status === 'inChat') { isReady = true; lastQR = null; }
       },
       headless: true,
-      useChrome: false, // Use the Chromium installed in the Docker image
+      useChrome: false,
       puppeteerOptions: {
-        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium',
-        args: ['--no-sandbox', '--disable-setuid-sandbox'],
+        executablePath: '/usr/bin/chromium',
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage',
+          '--disable-gpu',
+          `--host-resolver-rules=MAP web.whatsapp.com ${waIP}`,
+        ],
       },
-      logQR: true,
-      tokenStore: 'file',
-      folderNameToken: './tokens',
+      autoClose: 0,
+      updatesLog: false,
+      waitForLogin: false,
     });
-    console.log('WPPConnect initialized and logged in.');
-  } catch (error) {
-    console.error('Error starting WPPConnect:', error);
+    log('Client Created');
+  } catch (e: any) {
+    log('Init Error: ' + e.message);
+    statusMsg = 'Error: ' + e.message;
+  } finally {
+    isInitializing = false;
   }
 }
 
 app.listen(port, () => {
-  console.log(`Server started on port ${port}`);
-  startWPP();
+  log(`Node Backend started on port ${port}`);
+  // Initial start after 5 seconds
+  setTimeout(startWPP, 5000);
 });

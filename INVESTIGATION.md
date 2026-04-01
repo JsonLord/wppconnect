@@ -1,42 +1,39 @@
-# WPPConnect Project Investigation Report
+# WPPConnect Hugging Face Deployment Status
 
-## 1. Overall Architecture
-WPPConnect is a WhatsApp Web wrapper built with Node.js and Puppeteer. It follows a **layered inheritance model** where the final `Whatsapp` class inherits from a long chain of functional layers:
-`HostLayer` → `NewsletterLayer` → ... → `SenderLayer` → ... → `Whatsapp`.
+## Status: SUCCESSFUL
 
-This design allows for modularity, where each layer handles a specific set of WhatsApp features (e.g., messages, groups, business features).
+The codebase has been successfully adapted for deployment on Hugging Face Spaces with a dual-service architecture.
 
-## 2. Major Components
-- **Whatsapp Client (`src/api/whatsapp.ts`)**: The main entry point for developers.
-- **Initializer (`src/controllers/initializer.ts`)**: Handles session startup, browser launching, and authentication (QR code/tokens).
-- **WAPI/WPP (`src/lib/wapi`)**: The core JavaScript bridge injected into the WhatsApp Web browser context.
-- **Token Stores (`src/token-store`)**: Manages session persistence via files or memory.
-- **REST API Example (`examples/rest/index.js`)**: Demonstrates how to expose functionality via HTTP.
+### Architecture Overview
+1. **Node.js Backend**: Runs WPPConnect (WhatsApp Web automation) and exposes a local REST API on port 3000.
+2. **Python Frontend**: A Gradio application running on port 7860 (mandatory HF port) that provides a user-friendly interface.
 
-## 3. Workflow & Data Flow
-1.  **Launch**: Puppeteer opens WhatsApp Web.
-2.  **Auth**: User scans QR or uses a saved token.
-3.  **Injection**: `wapi.js` is injected into the page.
-4.  **Execution**: Node.js calls `client.method()` -> `page.evaluate()` -> `WAPI.method()` in browser.
-5.  **Feedback**: Browser events are sent back to Node.js via exposed functions.
+### Key Features Implemented
+- **Gradio Control Panel**:
+  - Live status monitoring.
+  - Interactive QR code display for easy authentication.
+  - Tabs for sending text messages and polls.
+  - Log streaming for debugging within the UI.
+  - Browser screenshot tab for visual debugging of Puppeteer.
+- **Resilient Backend**:
+  - Background initialization to satisfy HF health checks.
+  - DNS bypass strategy (manual IP resolution for web.whatsapp.com) to handle restricted network environments.
+  - Automatic token cleanup to prevent browser lock issues.
+- **Containerized Environment**:
+  - Multi-runtime Dockerfile (Node.js + Python + Chrome).
+  - Optimized Puppeteer flags for stable container operation.
 
-## 4. Feasibility for Deployment & Integration
+### Access and Usage
+- **URL**: `https://huggingface.co/spaces/AUXteam/wppconnect-api`
+- **Frontend**: Accessible via the main URL.
+- **API Endpoints**:
+  - `/health`: Check system status.
+  - `/api-docs`: View available endpoints.
+  - `/send-poll`: POST endpoint for automation.
 
-### Deployment (Docker / Hugging Face)
-- **Feasible**: Yes.
-- **Requirements**: A Docker environment with Node.js and Chromium system dependencies.
-- **Hugging Face**: Can run as a Docker Space. Persistence (tokens) must be handled carefully since Spaces are ephemeral.
-- **Puppeteer Config**: The project already includes flags (`--no-sandbox`) necessary for containerized environments.
-
-### Integration (Curl / Automation)
-- **Feasible**: Yes.
-- **Method**: Use an Express.js wrapper (like the provided `examples/rest`) to expose endpoints.
-- **Poll Messaging**: The `sendPollMessage` method is already implemented in `SenderLayer` and can be easily triggered via a POST request in a REST API.
-
-## 5. Notable Patterns & Risks
-- **wa-js Integration**: Uses `@wppconnect/wa-js` for robust internal module interaction.
-- **Risk**: Dependency on WhatsApp Web's internal structure; frequent updates of the library are required to maintain compatibility.
-- **Risk**: Browser resource usage (RAM) can be high in containerized environments.
+### Notes for Future Deployment
+- If the space is stuck on "Preparing", check the run logs. DNS resolution for WhatsApp can sometimes be delayed in new containers.
+- Persistence is currently ephemeral; the QR code must be scanned on each new deployment/restart.
 
 ---
-**Status**: READY for implementation instructions.
+**Deployment Manager**: Jules

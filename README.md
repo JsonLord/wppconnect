@@ -1,18 +1,19 @@
 ---
 title: WPPConnect API
+emoji: 🤖
+colorFrom: blue
+colorTo: green
 sdk: docker
 app_port: 7860
+pinned: false
 ---
 
-# WPPConnect API on Hugging Face Spaces
+# WPPConnect API
 
-This is an automated deployment of WPPConnect on Hugging Face Spaces. It exposes a REST API for WhatsApp interaction, including poll messaging.
+Node.js WhatsApp automation API running in Docker.
 
-## Mandatory Endpoints
-- **[/health](/health)**: Health check endpoint.
-- **[/api-docs](/api-docs)**: API documentation.
-
-## Functional Endpoints
-- **[/send-message](/send-message)**: Send a text message (POST).
-- **[/send-poll](/send-poll)**: Send a poll message (POST).
-- **[/get-connection-status](/get-connection-status)**: Get the current WhatsApp connection status (GET).
+## Endpoints
+- GET /health
+- GET /qr
+- POST /send-message
+- POST /send-poll
