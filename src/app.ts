@@ -18,7 +18,7 @@ const log = (msg: string) => {
   const entry = `${new Date().toISOString()} - ${msg}`;
   console.log(entry);
   appLogs.push(entry);
-  if (appLogs.length > 200) appLogs.shift();
+  if (appLogs.length > 500) appLogs.shift();
 };
 
 app.use(express.json());
@@ -40,7 +40,7 @@ app.get('/qr-data', (req, res) => {
 });
 
 app.get('/screenshot', async (req, res) => {
-  if (whatsappClient && whatsappClient.page) {
+  if (whatsappClient && whatsappClient.page && !whatsappClient.page.isClosed()) {
     try {
       const screenshot = await whatsappClient.page.screenshot({ encoding: 'base64' });
       const img = Buffer.from(screenshot as string, 'base64');
@@ -60,13 +60,19 @@ app.post('/init', (req, res) => {
   res.json({ success: true });
 });
 
-app.post('/send-message', async (req, res) => {
-  const { telnumber, message } = req.body;
-  if (!whatsappClient || !isReady) return res.status(503).json({ error: 'WhatsApp not ready' });
+app.post('/clear-session', (req, res) => {
+  log('Manual session clear');
   try {
-    const result = await whatsappClient.sendText(`${telnumber}@c.us`, message);
-    res.json({ success: true, result });
-  } catch (e: any) { res.status(500).json({ error: e.message }); }
+    const tokensDir = path.join(process.cwd(), 'tokens');
+    if (fs.existsSync(tokensDir)) fs.rmSync(tokensDir, { recursive: true, force: true });
+    whatsappClient = null;
+    isReady = false;
+    lastQR = null;
+    statusMsg = 'Cleared';
+    res.json({ success: true });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.post('/send-poll', async (req, res) => {
@@ -78,34 +84,38 @@ app.post('/send-poll', async (req, res) => {
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
+async function resolveMany(hosts: string[]): Promise<string[]> {
+  const resolver = new Resolver();
+  resolver.setServers(['8.8.8.8', '1.1.1.1']);
+  const rules: string[] = [];
+  for (const host of hosts) {
+    try {
+      const addrs = await new Promise<string[]>((resolve, reject) => {
+        resolver.resolve4(host, (err, addresses) => err ? reject(err) : resolve(addresses));
+      });
+      if (addrs.length > 0) {
+        rules.push(`MAP ${host} ${addrs[0]}`);
+      }
+    } catch (e) {}
+  }
+  return rules;
+}
+
 async function startWPP() {
   if (isInitializing) return;
   isInitializing = true;
   statusMsg = 'Initializing...';
-  log('Starting WPPConnect init...');
+  log('Starting initialization...');
 
-  // Try to get IP for web.whatsapp.com manually
-  let waIP = '157.240.22.60';
-  try {
-    const resolver = new Resolver();
-    resolver.setServers(['8.8.8.8', '1.1.1.1']);
-    const addrs = await new Promise<string[]>((resolve, reject) => {
-      resolver.resolve4('web.whatsapp.com', (err, addresses) => err ? reject(err) : resolve(addresses));
-    });
-    if (addrs && addrs.length > 0) {
-        waIP = addrs[0];
-        log(`Resolved web.whatsapp.com to ${waIP}`);
-    }
-  } catch (e) {
-    log(`DNS failure, using fallback IP ${waIP}`);
-  }
+  const dnsRules = await resolveMany([
+    'web.whatsapp.com',
+    'static.whatsapp.net',
+    'pps.whatsapp.net',
+    'mms.whatsapp.net'
+  ]);
 
-  // Cleanup tokens to avoid locks
-  try {
-    const tokensDir = path.join(process.cwd(), 'tokens');
-    if (fs.existsSync(tokensDir)) fs.rmSync(tokensDir, { recursive: true, force: true });
-    log('Cleaned tokens directory');
-  } catch (e) {}
+  const hostRules = dnsRules.join(',');
+  if (hostRules) log(`Host Rules: ${hostRules}`);
 
   try {
     whatsappClient = await wppconnect.create({
@@ -113,11 +123,11 @@ async function startWPP() {
       catchQR: (base64, ascii) => {
         lastQR = { base64, ascii };
         statusMsg = 'Waiting for scan';
-        log('QR generated');
+        log('QR code updated');
       },
       statusFind: (status) => {
         statusMsg = status;
-        log('Status Change: ' + status);
+        log('Status: ' + status);
         if (status === 'inChat') { isReady = true; lastQR = null; }
       },
       headless: true,
@@ -129,14 +139,25 @@ async function startWPP() {
           '--disable-setuid-sandbox',
           '--disable-dev-shm-usage',
           '--disable-gpu',
-          `--host-resolver-rules=MAP web.whatsapp.com ${waIP}`,
-        ],
+          '--disable-web-security',
+          hostRules ? `--host-resolver-rules=${hostRules}` : ''
+        ].filter(Boolean),
       },
       autoClose: 0,
       updatesLog: false,
       waitForLogin: false,
     });
-    log('Client Created');
+
+    if (whatsappClient.page) {
+      whatsappClient.page.on('console', msg => {
+          const text = msg.text();
+          if (!text.includes('TypeError: window.WAPI') && !text.includes('WAPI is not defined')) {
+             log(`Browser: ${text}`);
+          }
+      });
+    }
+
+    log('Client Object Created');
   } catch (e: any) {
     log('Init Error: ' + e.message);
     statusMsg = 'Error: ' + e.message;
@@ -146,7 +167,6 @@ async function startWPP() {
 }
 
 app.listen(port, () => {
-  log(`Node Backend started on port ${port}`);
-  // Initial start after 5 seconds
+  log(`Node Backend on port ${port}`);
   setTimeout(startWPP, 5000);
 });
